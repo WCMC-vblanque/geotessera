@@ -832,6 +832,8 @@ class Registry:
         registry_dir: Optional[Union[str, Path]] = None,
         landmasks_registry_url: Optional[str] = None,
         landmasks_registry_path: Optional[Union[str, Path]] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+        bbox_margin_deg: float = 0.15,
         logger: Optional[logging.Logger] = None,
     ):
         """Initialize Registry manager with optimized Parquet registries.
@@ -856,6 +858,22 @@ class Registry:
             registry_dir: Directory containing manifest.parquet and landmasks.parquet files (alternative to individual paths)
             landmasks_registry_url: URL to download landmasks Parquet registry from (default: remote)
             landmasks_registry_path: Local path to existing landmasks Parquet registry file
+            bbox: Optional (min_lon, min_lat, max_lon, max_lat) in EPSG:4326.
+                When given, the manifest is decoded with a lon/lat predicate
+                pushed down to the Parquet reader, so only tiles that can
+                possibly intersect this area are materialised into the
+                registry's GeoDataFrame. The manifest still goes through the
+                normal download/freshness-check path; only the in-memory
+                decode is scoped. Use this whenever the caller only needs
+                one region's tiles (e.g. a single AOI) rather than the whole
+                planet — the full manifest currently has ~4.7M rows and
+                costs several seconds and ~4GB of peak memory to fully
+                decode, regardless of how small the requested area is.
+            bbox_margin_deg: Degrees of margin added on each side of *bbox*
+                before filtering (default 0.15, larger than the library's
+                0.1° tile grid spacing) to make sure tiles whose centers
+                fall just outside the requested area, but whose 0.1°x0.1°
+                footprint still overlaps it, are not dropped.
             logger: Optional logger instance. If not provided, creates a new one
         """
         # Resolve version into a path component and a normalised numeric form.
@@ -932,6 +950,10 @@ class Registry:
             Path(landmasks_registry_path) if landmasks_registry_path else None
         )
 
+        # AOI scoping for the manifest decode step (see __init__ docstring).
+        self._bbox = tuple(bbox) if bbox else None
+        self._bbox_margin_deg = bbox_margin_deg
+
         # Memoizes validate_embeddings_dir() so per-tile fetches don't
         # re-read the sidecar.
         self._embeddings_dir_validated = False
@@ -999,8 +1021,28 @@ class Registry:
                     raise RuntimeError(f"Failed to download manifest: {e}") from e
 
         # Load as plain parquet first; promote to GeoDataFrame if needed.
+        # When a bbox was given, push a lon/lat range predicate down into the
+        # Parquet reader so only rows that can intersect the requested area
+        # are ever materialised — the full manifest is ~4.7M rows and costs
+        # several seconds and ~4GB of peak memory to decode in full,
+        # regardless of how small the caller's actual area of interest is.
         try:
-            df = pd.read_parquet(registry_path)
+            if self._bbox is not None:
+                import pyarrow.parquet as pq
+
+                min_lon, min_lat, max_lon, max_lat = self._bbox
+                margin = self._bbox_margin_deg
+                df = pq.read_table(
+                    str(registry_path),
+                    filters=[
+                        ("lon", ">=", min_lon - margin),
+                        ("lon", "<=", max_lon + margin),
+                        ("lat", ">=", min_lat - margin),
+                        ("lat", "<=", max_lat + margin),
+                    ],
+                ).to_pandas()
+            else:
+                df = pd.read_parquet(registry_path)
         except Exception as e:
             raise RuntimeError(f"Failed to load manifest parquet: {e}") from e
 
@@ -1008,7 +1050,12 @@ class Registry:
         # parquet (multi-source coverage rendering, manifest introspection, …).
         self.manifest_path = Path(registry_path)
 
-        self.logger.info(f"Loaded manifest with {len(df):,} tiles")
+        if self._bbox is not None:
+            self.logger.info(
+                f"Loaded manifest with {len(df):,} tiles (bbox-scoped to {self._bbox})"
+            )
+        else:
+            self.logger.info(f"Loaded manifest with {len(df):,} tiles")
 
         # Validate required columns (file-scan inventory schema).
         required_columns = {"lat", "lon", "year", "grid_size"}

@@ -100,6 +100,8 @@ class GeoTessera:
         registry_url: Optional[str] = None,
         registry_path: Optional[Union[str, Path]] = None,
         registry_dir: Optional[Union[str, Path]] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+        bbox_margin_deg: float = 0.15,
     ):
         """Initialize a client for downloading and reading individual tiles.
 
@@ -115,6 +117,17 @@ class GeoTessera:
             registry_path: Read an existing local manifest file.
             registry_dir: Read ``manifest.parquet`` and ``landmasks.parquet``
                 from this directory.
+            bbox: Optional (min_lon, min_lat, max_lon, max_lat) in EPSG:4326.
+                Scope the manifest decode to tiles that can intersect this
+                area, instead of materialising all ~4.7M tiles worldwide.
+                Use this whenever only one region (e.g. a single AOI) is
+                needed — it cuts both load time and peak memory
+                substantially and every other method still works unchanged,
+                as long as the tiles/points used stay within the region.
+            bbox_margin_deg: Degrees of margin added around *bbox* before
+                filtering (default 0.15) so tiles whose centers sit just
+                outside the requested area, but whose footprint still
+                overlaps it, are not dropped. Ignored if *bbox* is None.
         """
         self.dataset_version = dataset_version
 
@@ -135,6 +148,8 @@ class GeoTessera:
             registry_url=registry_url,
             registry_path=registry_path,
             registry_dir=registry_dir,
+            bbox=bbox,
+            bbox_margin_deg=bbox_margin_deg,
             logger=self.logger,
         )
         # The resolved variant (per-version default applied when the caller
