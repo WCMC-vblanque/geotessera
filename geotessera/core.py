@@ -118,16 +118,10 @@ class GeoTessera:
             registry_dir: Read ``manifest.parquet`` and ``landmasks.parquet``
                 from this directory.
             bbox: Optional (min_lon, min_lat, max_lon, max_lat) in EPSG:4326.
-                Scope the manifest decode to tiles that can intersect this
-                area, instead of materialising all ~4.7M tiles worldwide.
-                Use this whenever only one region (e.g. a single AOI) is
-                needed — it cuts both load time and peak memory
-                substantially and every other method still works unchanged,
-                as long as the tiles/points used stay within the region.
-            bbox_margin_deg: Degrees of margin added around *bbox* before
-                filtering (default 0.15) so tiles whose centers sit just
-                outside the requested area, but whose footprint still
-                overlaps it, are not dropped. Ignored if *bbox* is None.
+                Load only the tiles near this area. Fetching or sampling
+                outside it raises ValueError.
+            bbox_margin_deg: Degrees added to each side of *bbox* before
+                loading (default 0.15).
         """
         self.dataset_version = dataset_version
 
@@ -991,9 +985,16 @@ class GeoTessera:
                 points_by_tile[tile_key] = []
             points_by_tile[tile_key].append(idx)
 
+        if not points_by_tile:
+            return {}
+
         # Filter to only tiles that exist in the registry
+        lons = [lon for lon, _ in points]
+        lats = [lat for _, lat in points]
         available_tiles = set(
-            self.registry.load_blocks_for_region((-180, -90, 180, 90), year)
+            self.registry.load_blocks_for_region(
+                (min(lons), min(lats), max(lons), max(lats)), year
+            )
         )
 
         # Convert to set of (lon, lat) for faster lookup
